@@ -35,25 +35,9 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# /end → show menu
+# /end → End whatever game is active
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat_id = update.effective_chat.id
-    thread_id = update.message.message_thread_id
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        message_thread_id=thread_id,
-        text=(
-            "🛑 <b>End WordSeek Game</b>\n\n"
-            "Choose which game to end:\n\n"
-            "🔹 /end4 — End 4 letter game\n"
-            "🔹 /end5 — End 5 letter game\n"
-            "🔹 /end6 — End 6 letter game\n"
-            "🔹 /end7 — End 7 letter game"
-        ),
-        parse_mode="HTML"
-    )
+    await stop_game(update, context)  # Directly call stop_game
 
 
 async def end4(update: Update, context: ContextTypes.DEFAULT_TYPE):
