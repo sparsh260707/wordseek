@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 
 # ---------------- SETTINGS ----------------
 
-BOT_USERNAME = "WordSixBot"  # change if needed
+BOT_USERNAME = "@WordleGameProobot"  # change if needed
 
 IMAGE_URL = "https://graph.org/file/32981621f9dee50578e3f-e4f6630687ca8cb11a.jpg"
 
@@ -62,9 +62,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url=f"https://t.me/{BOT_USERNAME}?startgroup=true"
         )],
         [
-            InlineKeyboardButton("Updates", url="https://t.me/wordsixneteork"),
+            InlineKeyboardButton("Updates", url="https://t.me/AURA_NETWORKS"),
             InlineKeyboardButton("Help", callback_data="help_panel"),
-            InlineKeyboardButton("Discussion", url="https://t.me/sixletterword")
+            InlineKeyboardButton("Discussion", url="https://t.me/AURA_NETWORKS")
         ]
     ]
 
