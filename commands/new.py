@@ -32,25 +32,9 @@ async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE, word_le
     )
 
 
-# /new → show menu
+# /new → start 5-letter game directly
 async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat_id = update.effective_chat.id
-    thread_id = update.message.message_thread_id
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        message_thread_id=thread_id,
-        text=(
-            "🎮 <b>Start a new WordSeek game</b>\n\n"
-            "Choose word length:\n\n"
-            "🔹 /new4  — 4 letter\n"
-            "🔹 /new5  — 5 letter\n"
-            "🔹 /new6  — 6 letter\n"
-            "🔹 /new7  — 7 letter"
-        ),
-        parse_mode="HTML"
-    )
+    await start_game(update, context, 5)  # Default to 5-letter game
 
 
 async def new4(update: Update, context: ContextTypes.DEFAULT_TYPE):
