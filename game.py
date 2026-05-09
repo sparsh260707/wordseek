@@ -116,14 +116,14 @@ def get_word_meaning(word: str) -> str:
             if example:
                 parts.append(f"📝 Example:\n{example}")
 
-            return "\n\n".join(parts)
+            return "\n\n".join(parts) if parts else "Meaning not available."
 
         return str(data)
 
     try:
         meaning = get_meaning(word)
         if meaning:
-            return str(meaning)
+            return f"📖 {meaning}"
     except:
         pass
 
@@ -194,11 +194,11 @@ def score_guess(guess: str, answer: str) -> str:
     Score a guess against the answer
     🟩 = correct letter, correct position
     🟨 = correct letter, wrong position
-    🟥 = wrong letter
+    ⬛ = wrong letter
     """
     word_len = len(answer)
 
-    result = ["🟥"] * word_len
+    result = ["⬛"] * word_len
     answer_chars = list(answer)
 
     # First pass: mark correct positions
@@ -214,7 +214,8 @@ def score_guess(guess: str, answer: str) -> str:
         if guess[i] in answer_chars:
             result[i] = "🟨"
             # Remove the used character
-            answer_chars[answer_chars.index(guess[i])] = None
+            idx = answer_chars.index(guess[i])
+            answer_chars[idx] = None
 
     return "".join(result)
 
@@ -260,7 +261,12 @@ def build_board(state: GameState) -> str:
     """Build the complete game board as string"""
     if not state.board:
         return "No guesses yet!"
-    return "\n".join(state.board)
+    
+    # Add header with word length
+    header = f"📊 <b>{state.word_len}-Letter Word Game</b>\n"
+    header += f"🎯 Guesses: {len(state.guesses)}/{MAX_GUESSES}\n\n"
+    
+    return header + "\n".join(state.board)
 
 
 def get_remaining_guesses(state: GameState) -> int:
@@ -286,10 +292,12 @@ def reveal_answer_text(state: GameState) -> str:
     """Get formatted answer reveal text with meaning"""
     meaning = get_word_meaning(state.answer)
 
-    return (
-        f"\n\n🎯 Answer: <b>{state.answer.upper()}</b>\n\n"
-        f"{meaning}"
-    )
+    text = f"\n\n🎯 Answer: <b>{state.answer.upper()}</b>"
+    
+    if meaning and meaning != "Meaning not available.":
+        text += f"\n\n{meaning}"
+    
+    return text
 
 
 def get_game_stats(state: GameState) -> Dict:
