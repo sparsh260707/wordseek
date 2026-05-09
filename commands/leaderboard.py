@@ -7,106 +7,56 @@ from datetime import datetime
 from database import (
     get_global_leaderboard,
     get_chat_leaderboard,
-    get_user
+    get_user,
+    get_word_length_leaderboard  # New function we'll add
 )
 
 # ==================================================
 # FORMATTER
 # ==================================================
 
-def format_leaderboard(users, scope="global", period="all", chat_id=None):
+def format_leaderboard(users, scope="global", period="all", chat_id=None, word_length=None):
     text = ""
 
-    field_map = {
-        "today": "daily_points",
-        "week": "weekly_points",
-        "month": "monthly_points",
-        "year": "yearly_points",
-        "all": "global_points"
-    }
+    if word_length:
+        # For word length leaderboard
+        for i, user in enumerate(users):
+            medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
+            
+            # Points are already filtered in the query
+            pts = user.get("points", 0)
+            
+            name = html.escape(user.get("username", "User"))
+            user_id = user["_id"]
+            
+            clickable = f"<a href='tg://user?id={user_id}'>{name}</a>"
+            text += f"{medal} {clickable} — <b>{pts} pts</b>\n"
+    else:
+        # Regular leaderboard
+        field_map = {
+            "today": "daily_points",
+            "week": "weekly_points",
+            "month": "monthly_points",
+            "year": "yearly_points",
+            "all": "global_points"
+        }
 
-    for i, user in enumerate(users):
-        medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
+        for i, user in enumerate(users):
+            medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
 
-        if scope == "chat":
-            pts = user.get("chat_points", {}).get(str(chat_id), 0)
-        else:
-            field = field_map.get(period, "global_points")
-            pts = user.get(field, 0)
+            if scope == "chat":
+                pts = user.get("chat_points", {}).get(str(chat_id), 0)
+            else:
+                field = field_map.get(period, "global_points")
+                pts = user.get(field, 0)
 
-        name = html.escape(user.get("username", "User"))
-        user_id = user["_id"]
+            name = html.escape(user.get("username", "User"))
+            user_id = user["_id"]
 
-        clickable = f"<a href='tg://user?id={user_id}'>{name}</a>"
-
-        text += f"{medal} {clickable} — <b>{pts} pts</b>\n"
+            clickable = f"<a href='tg://user?id={user_id}'>{name}</a>"
+            text += f"{medal} {clickable} — <b>{pts} pts</b>\n"
 
     return text if text else "No data yet."
-
-
-# ==================================================
-# WORD LENGTH STATS FORMATTER
-# ==================================================
-
-async def show_word_length_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, word_length: int):
-    """Fetch and display scores for specific word length"""
-    user = get_user(user_id)
-    
-    if not user or "words" not in user:
-        text = f"📊 <b>Word Length: {word_length} Letters</b>\n\n"
-        text += "No words found for this length yet!\n"
-        text += "Play the game to start collecting words."
-        return text
-    
-    # Get all words from user's history
-    words_data = user.get("words", {})
-    
-    # Filter words by length
-    words_of_length = {}
-    total_score = 0
-    
-    for word, data in words_data.items():
-        if len(word) == word_length:
-            score = data.get("score", 0)
-            words_of_length[word] = {
-                "score": score,
-                "timestamp": data.get("timestamp", datetime.utcnow())
-            }
-            total_score += score
-    
-    if not words_of_length:
-        text = f"📊 <b>Word Length: {word_length} Letters</b>\n\n"
-        text += f"No {word_length}-letter words found yet!\n"
-        text += "Keep playing to discover new words."
-        return text
-    
-    # Sort by timestamp (most recent first) for recent words
-    sorted_words = sorted(
-        words_of_length.items(),
-        key=lambda x: x[1]["timestamp"],
-        reverse=True
-    )
-    
-    # Calculate statistics
-    unique_words = len(words_of_length)
-    avg_score = total_score / unique_words if unique_words > 0 else 0
-    
-    # Format the response
-    text = f"📊 <b>Word Length: {word_length} Letters</b>\n\n"
-    text += f"🔤 Unique words found: <b>{unique_words}</b>\n"
-    text += f"⭐ Total score: <b>{total_score} pts</b>\n"
-    text += f"📈 Average per word: <b>{avg_score:.1f} pts</b>\n\n"
-    
-    text += "📝 <b>Most Recent Words:</b>\n"
-    for word, data in sorted_words[:10]:
-        text += f"• <code>{word}</code> — {data['score']} pts\n"
-    
-    # Add highest scoring word if available
-    highest_score_word = max(words_of_length.items(), key=lambda x: x[1]["score"])
-    if highest_score_word:
-        text += f"\n🏆 <b>Highest scoring:</b> <code>{highest_score_word[0]}</code> — {highest_score_word[1]['score']} pts"
-    
-    return text
 
 
 # ==================================================
@@ -121,80 +71,79 @@ def find_rank(user_id, users):
 
 
 # ==================================================
-# KEYBOARD - EXACTLY LIKE IMAGE
+# KEYBOARD
 # ==================================================
 
-def build_keyboard(scope="global", period="all", show_stats=False):
+def build_keyboard(scope="global", period="all", word_length=None):
     buttons = []
     
     # Row 1: Scope buttons (Global and This chat)
     row1 = []
     
-    # Global button with « » styling if active
-    if scope == "global":
-        row1.append(InlineKeyboardButton("« Global »", callback_data=f"lb_global_{period}"))
-    else:
-        row1.append(InlineKeyboardButton("Global", callback_data=f"lb_global_{period}"))
+    # Only show scope buttons if not in word length view
+    if word_length is None:
+        if scope == "global":
+            row1.append(InlineKeyboardButton("« Global »", callback_data=f"lb_global_{period}"))
+        else:
+            row1.append(InlineKeyboardButton("Global", callback_data=f"lb_global_{period}"))
+        
+        if scope == "chat":
+            row1.append(InlineKeyboardButton("« This chat »", callback_data=f"lb_chat_{period}"))
+        else:
+            row1.append(InlineKeyboardButton("This chat", callback_data=f"lb_chat_{period}"))
+        
+        buttons.append(row1)
     
-    # This chat button with « » styling if active
-    if scope == "chat":
-        row1.append(InlineKeyboardButton("« This chat »", callback_data=f"lb_chat_{period}"))
-    else:
-        row1.append(InlineKeyboardButton("This chat", callback_data=f"lb_chat_{period}"))
-    
-    buttons.append(row1)
-    
-    # Row 2: Period buttons
-    row2 = []
-    
-    # Today button
-    if period == "today":
-        row2.append(InlineKeyboardButton("« Today »", callback_data=f"lb_{scope}_today"))
-    else:
-        row2.append(InlineKeyboardButton("Today", callback_data=f"lb_{scope}_today"))
-    
-    # This week button
-    if period == "week":
-        row2.append(InlineKeyboardButton("« This week »", callback_data=f"lb_{scope}_week"))
-    else:
-        row2.append(InlineKeyboardButton("This week", callback_data=f"lb_{scope}_week"))
-    
-    # This month button
-    if period == "month":
-        row2.append(InlineKeyboardButton("« This month »", callback_data=f"lb_{scope}_month"))
-    else:
-        row2.append(InlineKeyboardButton("This month", callback_data=f"lb_{scope}_month"))
-    
-    buttons.append(row2)
-    
-    # Row 3: More period buttons
-    row3 = []
-    
-    # This year button
-    if period == "year":
-        row3.append(InlineKeyboardButton("« This year »", callback_data=f"lb_{scope}_year"))
-    else:
-        row3.append(InlineKeyboardButton("This year", callback_data=f"lb_{scope}_year"))
-    
-    # All time button
-    if period == "all":
-        row3.append(InlineKeyboardButton("« All time »", callback_data=f"lb_{scope}_all"))
-    else:
-        row3.append(InlineKeyboardButton("All time", callback_data=f"lb_{scope}_all"))
-    
-    buttons.append(row3)
+    # Row 2: Period buttons (only for regular leaderboard)
+    if word_length is None:
+        row2 = []
+        
+        if period == "today":
+            row2.append(InlineKeyboardButton("« Today »", callback_data=f"lb_{scope}_today"))
+        else:
+            row2.append(InlineKeyboardButton("Today", callback_data=f"lb_{scope}_today"))
+        
+        if period == "week":
+            row2.append(InlineKeyboardButton("« This week »", callback_data=f"lb_{scope}_week"))
+        else:
+            row2.append(InlineKeyboardButton("This week", callback_data=f"lb_{scope}_week"))
+        
+        if period == "month":
+            row2.append(InlineKeyboardButton("« This month »", callback_data=f"lb_{scope}_month"))
+        else:
+            row2.append(InlineKeyboardButton("This month", callback_data=f"lb_{scope}_month"))
+        
+        buttons.append(row2)
+        
+        row3 = []
+        
+        if period == "year":
+            row3.append(InlineKeyboardButton("« This year »", callback_data=f"lb_{scope}_year"))
+        else:
+            row3.append(InlineKeyboardButton("This year", callback_data=f"lb_{scope}_year"))
+        
+        if period == "all":
+            row3.append(InlineKeyboardButton("« All time »", callback_data=f"lb_{scope}_all"))
+        else:
+            row3.append(InlineKeyboardButton("All time", callback_data=f"lb_{scope}_all"))
+        
+        buttons.append(row3)
     
     # Row 4: Word length buttons
-    row4 = [
-        InlineKeyboardButton("4 letters", callback_data="wordlen_4"),
-        InlineKeyboardButton("5 letters", callback_data="wordlen_5"),
-        InlineKeyboardButton("6 letters", callback_data="wordlen_6"),
-        InlineKeyboardButton("7 letters", callback_data="wordlen_7")
-    ]
+    row4 = []
+    lengths = [4, 5, 6, 7]
+    
+    for length in lengths:
+        if word_length == length:
+            # Active word length button
+            row4.append(InlineKeyboardButton(f"« {length} letters »", callback_data=f"wordlen_{length}"))
+        else:
+            row4.append(InlineKeyboardButton(f"{length} letters", callback_data=f"wordlen_{length}"))
+    
     buttons.append(row4)
     
-    # Row 5: Back button (only shown when viewing word stats)
-    if show_stats:
+    # Row 5: Back button (if in word length view)
+    if word_length is not None:
         buttons.append([
             InlineKeyboardButton("« Back to Leaderboard »", callback_data=f"lb_{scope}_{period}")
         ])
@@ -229,7 +178,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         title + body,
         parse_mode="HTML",
-        reply_markup=build_keyboard("global", "all", show_stats=False),
+        reply_markup=build_keyboard("global", "all", word_length=None),
         disable_web_page_preview=True
     )
 
@@ -246,28 +195,30 @@ async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = query.from_user.id
     data = query.data
     
-    # Handle word length score buttons
+    # Handle word length leaderboard buttons
     if data.startswith("wordlen_"):
         word_length = int(data.split("_")[1])
         
-        # Get current state from user_data
+        # Get word length leaderboard
+        users = get_word_length_leaderboard(word_length, limit=16)
+        
+        # Get user's rank
+        rank = find_rank(user_id, users)
+        
+        title = f"📊 <b>WORD LEADERBOARD</b>\n<code>{word_length}-Letter Words</code>\n\n"
+        body = format_leaderboard(users, word_length=word_length)
+        footer = f"\n━━━━━━━━━━━━\n👤 Your Rank: <b>{rank}</b>" if rank else ""
+        
+        new_text = title + body + footer
+        
+        # Store current state
         current_scope = context.user_data.get('last_scope', 'global')
         current_period = context.user_data.get('last_period', 'all')
         
-        # Show word length statistics
-        stats_text = await show_word_length_stats(update, context, user_id, word_length)
-        
-        # Add header
-        header = f"🔍 <b>Your {word_length}-Letter Word Stats</b>\n\n"
-        
         await query.message.edit_text(
-            header + stats_text,
+            new_text,
             parse_mode="HTML",
-            reply_markup=build_keyboard(
-                current_scope, 
-                current_period, 
-                show_stats=True
-            ),
+            reply_markup=build_keyboard(current_scope, current_period, word_length=word_length),
             disable_web_page_preview=True
         )
         return
@@ -279,7 +230,7 @@ async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     _, scope, period = parts
     
-    # Store current state for word length buttons
+    # Store current state
     context.user_data['last_scope'] = scope
     context.user_data['last_period'] = period
     
@@ -305,7 +256,7 @@ async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.edit_text(
             new_text,
             parse_mode="HTML",
-            reply_markup=build_keyboard(scope, period, show_stats=False),
+            reply_markup=build_keyboard(scope, period, word_length=None),
             disable_web_page_preview=True
         )
     except BadRequest as e:
