@@ -67,7 +67,7 @@ def register_user(user_id: int, username: str):
                 "last_month_reset": now.month,
                 "last_year_reset": now.year,
                 
-                "words": {}  # Added for word storage
+                "words": {}  # For storing word history
             }
         },
         upsert=True
@@ -104,7 +104,7 @@ def _check_and_reset(user):
 # ADD POINTS
 # ==================================================
 
-def add_points(user_id: int, chat_id: int, points: int):
+def add_points(user_id: int, chat_id: int, points: int, word: str = None):
     user = _users.find_one({"_id": user_id})
 
     if not user:
@@ -132,73 +132,164 @@ def add_points(user_id: int, chat_id: int, points: int):
             }
         }
     )
+    
+    # If word is provided, store it
+    if word:
+        add_word_score(user_id, word, points, chat_id)
 
 # ==================================================
 # ADD WORD SCORE
 # ==================================================
 
-def add_word_score(user_id: int, word: str, score: int):
+def add_word_score(user_id: int, word: str, score: int, chat_id: int = None):
     """Store word scores for a user"""
     now = datetime.utcnow()
+    word_lower = word.lower()
+    word_length = len(word_lower)
     
-    _users.update_one(
-        {"_id": user_id},
-        {
-            "$set": {
-                f"words.{word}": {
-                    "score": score,
-                    "timestamp": now,
-                    "length": len(word)
+    # Check if word already exists
+    existing = _users.find_one(
+        {"_id": user_id, f"words.{word_lower}": {"$exists": True}}
+    )
+    
+    if existing:
+        # Update existing word (add to score)
+        _users.update_one(
+            {"_id": user_id},
+            {
+                "$inc": {f"words.{word_lower}.score": score},
+                "$set": {
+                    f"words.{word_lower}.timestamp": now,
+                    f"words.{word_lower}.last_played": now
                 }
             }
-        },
-        upsert=True
-    )
-
-# ==================================================
-# GET USER WORDS STATS
-# ==================================================
-
-def get_user_word_stats(user_id: int, word_length: int = None):
-    """Get word statistics for a user, optionally filtered by length"""
-    user = _users.find_one({"_id": user_id})
-    
-    if not user or "words" not in user:
-        return None
-    
-    words_data = user.get("words", {})
-    
-    if word_length:
-        # Filter by specific length
-        filtered_words = {}
-        total_score = 0
-        
-        for word, data in words_data.items():
-            if len(word) == word_length:
-                filtered_words[word] = data
-                total_score += data.get("score", 0)
-        
-        return {
-            "words": filtered_words,
-            "total_words": len(filtered_words),
-            "total_score": total_score,
-            "avg_score": total_score / len(filtered_words) if filtered_words else 0
-        }
+        )
     else:
-        # Return all words
-        total_score = sum(data.get("score", 0) for data in words_data.values())
-        return {
-            "words": words_data,
-            "total_words": len(words_data),
-            "total_score": total_score,
-            "avg_score": total_score / len(words_data) if words_data else 0
-        }
+        # Add new word
+        _users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    f"words.{word_lower}": {
+                        "score": score,
+                        "timestamp": now,
+                        "length": word_length,
+                        "first_played": now,
+                        "last_played": now,
+                        "times_played": 1
+                    }
+                }
+            },
+            upsert=True
+        )
+
+# ==================================================
+# GET WORD LENGTH LEADERBOARD
+# ==================================================
+
+def get_word_length_leaderboard(word_length: int, limit=16):
+    """
+    Get leaderboard of users based on their total score for a specific word length
+    """
+    pipeline = [
+        # Match users who have words
+        {"$match": {"words": {"$exists": True, "$ne": {}}}},
+        
+        # Project to create an array of word entries with their lengths
+        {"$project": {
+            "username": 1,
+            "words": 1,
+            "word_scores": {"$objectToArray": "$words"}
+        }},
+        
+        # Unwind to process each word individually
+        {"$unwind": "$word_scores"},
+        
+        # Add field for word length
+        {"$addFields": {
+            "word_len": "$word_scores.v.length"
+        }},
+        
+        # Filter for specific word length
+        {"$match": {"word_len": word_length}},
+        
+        # Group back by user to sum scores
+        {"$group": {
+            "_id": "$_id",
+            "username": {"$first": "$username"},
+            "points": {"$sum": "$word_scores.v.score"},
+            "word_count": {"$sum": 1}
+        }},
+        
+        # Only include users with points > 0
+        {"$match": {"points": {"$gt": 0}}},
+        
+        # Sort by points descending
+        {"$sort": {"points": -1}},
+        
+        # Limit results
+        {"$limit": limit}
+    ]
+    
+    results = list(_users.aggregate(pipeline))
+    
+    # Format to match expected structure
+    formatted_results = []
+    for result in results:
+        formatted_results.append({
+            "_id": result["_id"],
+            "username": result.get("username", "User"),
+            "points": result["points"],
+            "word_count": result["word_count"]
+        })
+    
+    return formatted_results
+
+
+def get_user_word_length_rank(user_id: int, word_length: int):
+    """
+    Get a user's rank for a specific word length
+    """
+    pipeline = [
+        {"$match": {"words": {"$exists": True, "$ne": {}}}},
+        {"$project": {
+            "username": 1,
+            "word_scores": {"$objectToArray": "$words"}
+        }},
+        {"$unwind": "$word_scores"},
+        {"$addFields": {
+            "word_len": "$word_scores.v.length"
+        }},
+        {"$match": {"word_len": word_length}},
+        {"$group": {
+            "_id": "$_id",
+            "username": {"$first": "$username"},
+            "points": {"$sum": "$word_scores.v.score"}
+        }},
+        {"$match": {"points": {"$gt": 0}}},
+        {"$sort": {"points": -1}},
+        
+        # Add rank field
+        {"$group": {
+            "_id": None,
+            "users": {"$push": "$$ROOT"}
+        }},
+        {"$unwind": {"path": "$users", "includeArrayIndex": "rank"}},
+        {"$match": {"users._id": user_id}},
+        {"$project": {
+            "rank": {"$add": ["$rank", 1]},
+            "points": "$users.points"
+        }}
+    ]
+    
+    result = list(_users.aggregate(pipeline))
+    return result[0]["rank"] if result else None
 
 # ==================================================
 # GAME STATS
 # ==================================================
 
-def update_stats(user_id: int, username: str, win: bool, attempts_used: int):
+def update_stats(user_id: int, username: str, win: bool, attempts_used: int, word_length: int = None):
     user = _users.find_one({"_id": user_id})
 
     if not user:
@@ -217,17 +308,22 @@ def update_stats(user_id: int, username: str, win: bool, attempts_used: int):
     else:
         streak = 0
 
+    update_data = {
+        "username": username,
+        "games": games,
+        "wins": wins,
+        "streak": streak,
+        "best": best
+    }
+    
+    # Track per-length stats if word_length provided
+    if word_length:
+        update_data[f"games_by_length.{word_length}"] = games
+        update_data[f"wins_by_length.{word_length}"] = wins
+
     _users.update_one(
         {"_id": user_id},
-        {
-            "$set": {
-                "username": username,
-                "games": games,
-                "wins": wins,
-                "streak": streak,
-                "best": best
-            }
-        }
+        {"$set": update_data}
     )
 
 # ==================================================
@@ -357,6 +453,17 @@ def get_user(user_id: int):
 
 def get_user_profile(user_id: int):
     return _users.find_one({"_id": user_id})
+
+def get_user_words(user_id: int, word_length: int = None):
+    """Get user's words, optionally filtered by length"""
+    user = get_user(user_id)
+    if not user or "words" not in user:
+        return {}
+    
+    words = user["words"]
+    if word_length:
+        return {word: data for word, data in words.items() if data.get("length") == word_length}
+    return words
 
 # ==================================================
 # UPDATE USERNAME
