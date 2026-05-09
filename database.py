@@ -1,21 +1,303 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from telegram.error import BadRequest
-import html
-
-from database import (
-    get_global_leaderboard,
-    get_chat_leaderboard,
-    get_user  # Added this import
-)
+import os
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from pymongo import MongoClient, DESCENDING
 
 # ==================================================
-# FORMATTER
+# ENV
 # ==================================================
 
-def format_leaderboard(users, scope="global", period="all", chat_id=None):
-    text = ""
+load_dotenv()
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
 
+if not MONGO_URI:
+    raise ValueError("MONGO_URI missing in .env")
+
+_client = MongoClient(MONGO_URI)
+_db = _client["wordseek"]
+_users = _db["users"]
+
+# ==================================================
+# INDEXES
+# ==================================================
+
+def ensure_indexes():
+    _users.create_index([("global_points", DESCENDING)])
+    _users.create_index([("daily_points", DESCENDING)])
+    _users.create_index([("weekly_points", DESCENDING)])
+    _users.create_index([("monthly_points", DESCENDING)])
+    _users.create_index([("yearly_points", DESCENDING)])
+    _users.create_index([("wins", DESCENDING)])
+    _users.create_index([("tournament_points", DESCENDING)])
+    _users.create_index([("chat_points", DESCENDING)])
+
+# ==================================================
+# REGISTER USER
+# ==================================================
+
+def register_user(user_id: int, username: str):
+    now = datetime.utcnow()
+
+    _users.update_one(
+        {"_id": user_id},
+        {
+            "$setOnInsert": {
+                "username": username,
+                "games": 0,
+                "wins": 0,
+                "streak": 0,
+                "best": 999999,
+
+                "global_points": 0,
+                "daily_points": 0,
+                "weekly_points": 0,
+                "monthly_points": 0,
+                "yearly_points": 0,
+
+                "chat_points": {},
+
+                "tournament_points": 0,
+                "tournament_joined": False,
+                "tournament_qualified": False,
+
+                "double_points_until": None,
+
+                "last_daily_reset": now,
+                "last_week_reset": now.isocalendar()[1],
+                "last_month_reset": now.month,
+                "last_year_reset": now.year,
+                
+                "words": {}  # Added for word storage
+            }
+        },
+        upsert=True
+    )
+
+# ==================================================
+# RESET CHECK
+# ==================================================
+
+def _check_and_reset(user):
+    now = datetime.utcnow()
+    updates = {}
+
+    if not user.get("last_daily_reset") or user["last_daily_reset"].date() != now.date():
+        updates["daily_points"] = 0
+        updates["last_daily_reset"] = now
+
+    if user.get("last_week_reset") != now.isocalendar()[1]:
+        updates["weekly_points"] = 0
+        updates["last_week_reset"] = now.isocalendar()[1]
+
+    if user.get("last_month_reset") != now.month:
+        updates["monthly_points"] = 0
+        updates["last_month_reset"] = now.month
+
+    if user.get("last_year_reset") != now.year:
+        updates["yearly_points"] = 0
+        updates["last_year_reset"] = now.year
+
+    if updates:
+        _users.update_one({"_id": user["_id"]}, {"$set": updates})
+
+# ==================================================
+# ADD POINTS
+# ==================================================
+
+def add_points(user_id: int, chat_id: int, points: int):
+    user = _users.find_one({"_id": user_id})
+
+    if not user:
+        register_user(user_id, "User")
+        user = _users.find_one({"_id": user_id})
+
+    _check_and_reset(user)
+
+    now = datetime.utcnow()
+    double_until = user.get("double_points_until")
+
+    if double_until and now < double_until:
+        points *= 2
+
+    _users.update_one(
+        {"_id": user_id},
+        {
+            "$inc": {
+                "global_points": points,
+                "daily_points": points,
+                "weekly_points": points,
+                "monthly_points": points,
+                "yearly_points": points,
+                f"chat_points.{chat_id}": points
+            }
+        }
+    )
+
+# ==================================================
+# ADD WORD SCORE
+# ==================================================
+
+def add_word_score(user_id: int, word: str, score: int):
+    """Store word scores for a user"""
+    now = datetime.utcnow()
+    
+    _users.update_one(
+        {"_id": user_id},
+        {
+            "$set": {
+                f"words.{word}": {
+                    "score": score,
+                    "timestamp": now,
+                    "length": len(word)
+                }
+            }
+        },
+        upsert=True
+    )
+
+# ==================================================
+# GET USER WORDS STATS
+# ==================================================
+
+def get_user_word_stats(user_id: int, word_length: int = None):
+    """Get word statistics for a user, optionally filtered by length"""
+    user = _users.find_one({"_id": user_id})
+    
+    if not user or "words" not in user:
+        return None
+    
+    words_data = user.get("words", {})
+    
+    if word_length:
+        # Filter by specific length
+        filtered_words = {}
+        total_score = 0
+        
+        for word, data in words_data.items():
+            if len(word) == word_length:
+                filtered_words[word] = data
+                total_score += data.get("score", 0)
+        
+        return {
+            "words": filtered_words,
+            "total_words": len(filtered_words),
+            "total_score": total_score,
+            "avg_score": total_score / len(filtered_words) if filtered_words else 0
+        }
+    else:
+        # Return all words
+        total_score = sum(data.get("score", 0) for data in words_data.values())
+        return {
+            "words": words_data,
+            "total_words": len(words_data),
+            "total_score": total_score,
+            "avg_score": total_score / len(words_data) if words_data else 0
+        }
+
+# ==================================================
+# GAME STATS
+# ==================================================
+
+def update_stats(user_id: int, username: str, win: bool, attempts_used: int):
+    user = _users.find_one({"_id": user_id})
+
+    if not user:
+        register_user(user_id, username)
+        user = _users.find_one({"_id": user_id})
+
+    games = user.get("games", 0) + 1
+    wins = user.get("wins", 0)
+    streak = user.get("streak", 0)
+    best = user.get("best", 999999)
+
+    if win:
+        wins += 1
+        streak += 1
+        best = min(best, attempts_used)
+    else:
+        streak = 0
+
+    _users.update_one(
+        {"_id": user_id},
+        {
+            "$set": {
+                "username": username,
+                "games": games,
+                "wins": wins,
+                "streak": streak,
+                "best": best
+            }
+        }
+    )
+
+# ==================================================
+# TOURNAMENT FUNCTIONS
+# ==================================================
+
+def join_tournament(user_id: int, username: str):
+    register_user(user_id, username)
+    _users.update_one(
+        {"_id": user_id},
+        {"$set": {
+            "username": username,
+            "tournament_joined": True,
+            "tournament_qualified": True
+        }}
+    )
+
+def add_tournament_points(user_id: int, points: int):
+    _users.update_one(
+        {
+            "_id": user_id,
+            "tournament_joined": True,
+            "tournament_qualified": True
+        },
+        {"$inc": {"tournament_points": points}}
+    )
+
+def reset_tournament_all():
+    _users.update_many(
+        {},
+        {"$set": {
+            "tournament_points": 0,
+            "tournament_joined": False,
+            "tournament_qualified": False
+        }}
+    )
+
+def reset_tournament_points_only():
+    _users.update_many(
+        {"tournament_joined": True},
+        {"$set": {"tournament_points": 0}}
+    )
+
+def get_tournament_leaderboard(limit=16):
+    return list(
+        _users.find({
+            "tournament_joined": True,
+            "username": {"$exists": True, "$ne": ""}
+        })
+        .sort("tournament_points", DESCENDING)
+        .limit(limit)
+    )
+
+# ==================================================
+# DOUBLE POINT PRIZE
+# ==================================================
+
+def set_double_points_prize(user_id: int, days: int = 3):
+    until = datetime.utcnow() + timedelta(days=days)
+    _users.update_one(
+        {"_id": user_id},
+        {"$set": {"double_points_until": until}}
+    )
+    return until
+
+# ==================================================
+# LEADERBOARDS
+# ==================================================
+
+def get_global_leaderboard(period="all", limit=16):
     field_map = {
         "today": "daily_points",
         "week": "weekly_points",
@@ -24,270 +306,64 @@ def format_leaderboard(users, scope="global", period="all", chat_id=None):
         "all": "global_points"
     }
 
-    for i, user in enumerate(users):
-        medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
+    field = field_map.get(period, "global_points")
 
-        if scope == "chat":
-            pts = user.get("chat_points", {}).get(str(chat_id), 0)
-        else:
-            field = field_map.get(period, "global_points")
-            pts = user.get(field, 0)
-
-        name = html.escape(user.get("username", "User"))
-        user_id = user["_id"]
-
-        clickable = f"<a href='tg://user?id={user_id}'>{name}</a>"
-
-        text += f"{medal} {clickable} — <b>{pts} pts</b>\n"
-
-    return text if text else "No data yet."
-
-
-# ==================================================
-# WORD LENGTH STATS FORMATTER
-# ==================================================
-
-async def show_word_length_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, word_length: int):
-    """Fetch and display scores for specific word length"""
-    user = get_user(user_id)
-    
-    if not user or "words" not in user:
-        text = f"📊 <b>Word Length: {word_length} Letters</b>\n\n"
-        text += "No words found for this length yet!\n"
-        text += "Play the game to start collecting words."
-        return text
-    
-    # Get all words from user's history
-    words_data = user.get("words", {})
-    
-    # Filter words by length
-    words_of_length = {}
-    total_score = 0
-    
-    for word, data in words_data.items():
-        if len(word) == word_length:
-            score = data.get("score", 0)
-            words_of_length[word] = {
-                "score": score,
-                "timestamp": data.get("timestamp", datetime.utcnow())
-            }
-            total_score += score
-    
-    if not words_of_length:
-        text = f"📊 <b>Word Length: {word_length} Letters</b>\n\n"
-        text += f"No {word_length}-letter words found yet!\n"
-        text += "Keep playing to discover new words."
-        return text
-    
-    # Sort by timestamp (most recent first) for recent words
-    sorted_words = sorted(
-        words_of_length.items(),
-        key=lambda x: x[1]["timestamp"],
-        reverse=True
-    )
-    
-    # Calculate statistics
-    unique_words = len(words_of_length)
-    avg_score = total_score / unique_words if unique_words > 0 else 0
-    
-    # Format the response
-    text = f"📊 <b>Word Length: {word_length} Letters</b>\n\n"
-    text += f"🔤 Unique words found: <b>{unique_words}</b>\n"
-    text += f"⭐ Total score: <b>{total_score} pts</b>\n"
-    text += f"📈 Average per word: <b>{avg_score:.1f} pts</b>\n\n"
-    
-    text += "📝 <b>Most Recent Words:</b>\n"
-    for word, data in sorted_words[:10]:
-        text += f"• <code>{word}</code> — {data['score']} pts\n"
-    
-    # Add highest scoring word if available
-    highest_score_word = max(words_of_length.items(), key=lambda x: x[1]["score"])
-    if highest_score_word:
-        text += f"\n🏆 <b>Highest scoring:</b> <code>{highest_score_word[0]}</code> — {highest_score_word[1]['score']} pts"
-    
-    return text
-
-
-# ==================================================
-# FIND RANK
-# ==================================================
-
-def find_rank(user_id, users):
-    for i, user in enumerate(users, start=1):
-        if user["_id"] == user_id:
-            return i
-    return None
-
-
-# ==================================================
-# KEYBOARD
-# ==================================================
-
-def build_keyboard(scope="global", period="all", show_word_buttons=False, current_word_len=None):
-    buttons = []
-    
-    # Leaderboard navigation buttons
-    def scope_btn(label, btn_scope):
-        active = scope == btn_scope
-        text = f"🔵 {label}" if active else label
-        return InlineKeyboardButton(text, callback_data=f"lb_{btn_scope}_{period}")
-    
-    def period_btn(label, btn_period):
-        active = period == btn_period
-        text = f"🔹 {label}" if active else label
-        return InlineKeyboardButton(text, callback_data=f"lb_{scope}_{btn_period}")
-    
-    # Row 1: Scope selection
-    buttons.append([
-        scope_btn("Global", "global"),
-        scope_btn("« This chat »", "chat")
-    ])
-    
-    # Row 2: Period selection (daily, weekly, monthly)
-    buttons.append([
-        period_btn("Today", "today"),
-        period_btn("This week", "week"),
-        period_btn("This month", "month"),
-    ])
-    
-    # Row 3: Period selection (yearly, all time)
-    buttons.append([
-        period_btn("This year", "year"),
-        period_btn("All time", "all"),
-    ])
-    
-    # Row 4: Refresh button
-    buttons.append([
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"lb_{scope}_{period}")
-    ])
-    
-    # Row 5: Word length buttons
-    word_buttons = []
-    for length in [4, 5, 6, 7]:
-        is_active = current_word_len == length
-        emoji = "🔵" if is_active else "⚪"
-        word_buttons.append(
-            InlineKeyboardButton(
-                f"{emoji} {length} Letters", 
-                callback_data=f"wordlen_{length}"
-            )
-        )
-    buttons.append(word_buttons)
-    
-    # Row 6: Back to leaderboard button (only shown when viewing word stats)
-    if show_word_buttons:
-        buttons.append([
-            InlineKeyboardButton("◀️ Back to Leaderboard", callback_data=f"lb_{scope}_{period}")
-        ])
-    
-    # Row 7: Social links
-    buttons.append([
-        InlineKeyboardButton("📢 Updates", url="https://t.me/wordsixneteork"),
-        InlineKeyboardButton("💬 Discussion", url="https://t.me/sixletterword")
-    ])
-    
-    return InlineKeyboardMarkup(buttons)
-
-
-# ==================================================
-# MAIN COMMAND
-# ==================================================
-
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users = get_global_leaderboard("all", limit=16)
-    
-    title = "🏆 <b>GLOBAL LEADERBOARD</b>\n<code>All Time</code>\n\n"
-    body = format_leaderboard(users, "global", "all")
-    
-    # Initialize user data for word length buttons
-    if 'last_scope' not in context.user_data:
-        context.user_data['last_scope'] = 'global'
-    if 'last_period' not in context.user_data:
-        context.user_data['last_period'] = 'all'
-    
-    await update.message.reply_text(
-        title + body,
-        parse_mode="HTML",
-        reply_markup=build_keyboard("global", "all", show_word_buttons=False),
-        disable_web_page_preview=True
+    return list(
+        _users.find({
+            field: {"$gt": 0},
+            "username": {"$exists": True, "$ne": ""}
+        })
+        .sort(field, DESCENDING)
+        .limit(limit)
     )
 
+def get_chat_leaderboard(chat_id: int, period="all", limit=16):
+
+    if period == "all":
+        return list(
+            _users.find({
+                f"chat_points.{chat_id}": {"$gt": 0},
+                "username": {"$exists": True, "$ne": ""}
+            })
+            .sort(f"chat_points.{chat_id}", DESCENDING)
+            .limit(limit)
+        )
+
+    period_map = {
+        "today": "daily_points",
+        "week": "weekly_points",
+        "month": "monthly_points",
+        "year": "yearly_points",
+    }
+
+    field = period_map.get(period, "daily_points")
+
+    return list(
+        _users.find({
+            f"chat_points.{chat_id}": {"$exists": True},
+            field: {"$gt": 0},
+            "username": {"$exists": True, "$ne": ""}
+        })
+        .sort(field, DESCENDING)
+        .limit(limit)
+    )
 
 # ==================================================
-# CALLBACK HANDLER
+# USER FETCH
 # ==================================================
 
-async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer(cache_time=1)
-    
-    chat_id = query.message.chat.id
-    user_id = query.from_user.id
-    data = query.data
-    
-    # Handle word length score buttons
-    if data.startswith("wordlen_"):
-        word_length = int(data.split("_")[1])
-        
-        # Get current state from user_data
-        current_scope = context.user_data.get('last_scope', 'global')
-        current_period = context.user_data.get('last_period', 'all')
-        
-        # Show word length statistics
-        stats_text = await show_word_length_stats(update, context, user_id, word_length)
-        
-        # Add header
-        header = f"🔍 <b>Your {word_length}-Letter Word Stats</b>\n\n"
-        
-        await query.message.edit_text(
-            header + stats_text,
-            parse_mode="HTML",
-            reply_markup=build_keyboard(
-                current_scope, 
-                current_period, 
-                show_word_buttons=True,
-                current_word_len=word_length
-            ),
-            disable_web_page_preview=True
-        )
-        return
-    
-    # Handle leaderboard navigation
-    parts = data.split("_")
-    if len(parts) != 3:
-        return
-    
-    _, scope, period = parts
-    
-    # Store current state for word length buttons
-    context.user_data['last_scope'] = scope
-    context.user_data['last_period'] = period
-    
-    if scope == "global":
-        users = get_global_leaderboard(period, limit=16)
-        title = f"🏆 <b>GLOBAL LEADERBOARD</b>\n<code>{period.title()}</code>\n\n"
-        body = format_leaderboard(users, "global", period)
-        rank = find_rank(user_id, users)
-    
-    elif scope == "chat":
-        users = get_chat_leaderboard(chat_id, period, limit=16)
-        title = f"🏆 <b>THIS CHAT LEADERBOARD</b>\n<code>{period.title()}</code>\n\n"
-        body = format_leaderboard(users, "chat", period, chat_id)
-        rank = find_rank(user_id, users)
-    
-    else:
-        return
-    
-    footer = f"\n━━━━━━━━━━━━\n👤 Your Rank: <b>{rank}</b>" if rank else ""
-    new_text = title + body + footer
-    
-    try:
-        await query.message.edit_text(
-            new_text,
-            parse_mode="HTML",
-            reply_markup=build_keyboard(scope, period, show_word_buttons=False),
-            disable_web_page_preview=True
-        )
-    except BadRequest as e:
-        if "Message is not modified" not in str(e):
-            raise
+def get_user(user_id: int):
+    return _users.find_one({"_id": user_id})
+
+def get_user_profile(user_id: int):
+    return _users.find_one({"_id": user_id})
+
+# ==================================================
+# UPDATE USERNAME
+# ==================================================
+
+def update_username(user_id: int, username: str):
+    _users.update_one(
+        {"_id": user_id},
+        {"$set": {"username": username}}
+    )
