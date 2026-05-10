@@ -79,18 +79,23 @@ def _check_and_reset(user):
     now = datetime.utcnow()
     updates = {}
 
+    # Daily reset
     if not user.get("last_daily_reset") or user["last_daily_reset"].date() != now.date():
         updates["daily_points"] = 0
         updates["last_daily_reset"] = now
 
-    if user.get("last_week_reset") != now.isocalendar()[1]:
+    # Weekly reset (ISO week number)
+    current_week = now.isocalendar()[1]
+    if user.get("last_week_reset") != current_week:
         updates["weekly_points"] = 0
-        updates["last_week_reset"] = now.isocalendar()[1]
+        updates["last_week_reset"] = current_week
 
+    # Monthly reset
     if user.get("last_month_reset") != now.month:
         updates["monthly_points"] = 0
         updates["last_month_reset"] = now.month
 
+    # Yearly reset
     if user.get("last_year_reset") != now.year:
         updates["yearly_points"] = 0
         updates["last_year_reset"] = now.year
@@ -109,14 +114,17 @@ def add_points(user_id: int, chat_id: int, points: int):
         register_user(user_id, "User")
         user = _users.find_one({"_id": user_id})
 
+    # Check and reset time-based points
     _check_and_reset(user)
 
+    # Double points check
     now = datetime.utcnow()
     double_until = user.get("double_points_until")
 
     if double_until and now < double_until:
         points *= 2
 
+    # Update ALL point fields simultaneously
     _users.update_one(
         {"_id": user_id},
         {
@@ -162,7 +170,7 @@ def update_stats(user_id: int, username: str, win: bool, attempts_used: int):
                 "games": games,
                 "wins": wins,
                 "streak": streak,
-                "best": best
+                "best": best if best != 999999 else 0
             }
         }
     )
@@ -231,7 +239,7 @@ def set_double_points_prize(user_id: int, days: int = 3):
     return until
 
 # ==================================================
-# LEADERBOARDS
+# LEADERBOARDS - FIXED VERSION
 # ==================================================
 
 def get_global_leaderboard(period="all", limit=16):
@@ -255,8 +263,14 @@ def get_global_leaderboard(period="all", limit=16):
     )
 
 def get_chat_leaderboard(chat_id: int, period="all", limit=16):
-
+    """
+    Get leaderboard for a specific chat
+    - For 'all' period: Show chat-specific points
+    - For other periods: Show time-based global points but only for users active in this chat
+    """
+    
     if period == "all":
+        # Show chat_points (points earned specifically in this chat)
         return list(
             _users.find({
                 f"chat_points.{chat_id}": {"$gt": 0},
@@ -265,25 +279,27 @@ def get_chat_leaderboard(chat_id: int, period="all", limit=16):
             .sort(f"chat_points.{chat_id}", DESCENDING)
             .limit(limit)
         )
-
-    period_map = {
-        "today": "daily_points",
-        "week": "weekly_points",
-        "month": "monthly_points",
-        "year": "yearly_points",
-    }
-
-    field = period_map.get(period, "daily_points")
-
-    return list(
-        _users.find({
-            f"chat_points.{chat_id}": {"$exists": True},
-            field: {"$gt": 0},
-            "username": {"$exists": True, "$ne": ""}
-        })
-        .sort(field, DESCENDING)
-        .limit(limit)
-    )
+    else:
+        # For time periods: Use global time-based points but filter by chat activity
+        period_map = {
+            "today": "daily_points",
+            "week": "weekly_points",
+            "month": "monthly_points",
+            "year": "yearly_points",
+        }
+        
+        field = period_map.get(period, "daily_points")
+        
+        # Users who have points in this chat AND have time-based points
+        return list(
+            _users.find({
+                f"chat_points.{chat_id}": {"$exists": True},
+                field: {"$gt": 0},
+                "username": {"$exists": True, "$ne": ""}
+            })
+            .sort(field, DESCENDING)
+            .limit(limit)
+        )
 
 # ==================================================
 # USER FETCH
