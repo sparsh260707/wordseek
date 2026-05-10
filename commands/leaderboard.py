@@ -15,6 +15,7 @@ from database import (
 def format_leaderboard(users, scope="global", period="all", chat_id=None):
     text = ""
 
+    # Map period to correct database field
     field_map = {
         "today": "daily_points",
         "week": "weekly_points",
@@ -71,17 +72,17 @@ def build_keyboard(scope="global", period="all"):
 
     return InlineKeyboardMarkup([
         [
-            scope_btn("Global", "global"),
-            scope_btn("« This chat »", "chat")
+            scope_btn("🌍 Global", "global"),
+            scope_btn("💬 This Chat", "chat")
         ],
         [
-            period_btn("Today", "today"),
-            period_btn("This week", "week"),
-            period_btn("This month", "month"),
+            period_btn("📅 Today", "today"),
+            period_btn("📆 This Week", "week"),
+            period_btn("📊 This Month", "month"),
         ],
         [
-            period_btn("This year", "year"),
-            period_btn("All time", "all"),
+            period_btn("🎯 This Year", "year"),
+            period_btn("🏆 All Time", "all"),
         ],
         [
             InlineKeyboardButton("🔄 Refresh", callback_data=f"lb_{scope}_{period}")
@@ -133,20 +134,24 @@ async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if scope == "global":
         users = get_global_leaderboard(period, limit=16)
-        title = f"🏆 <b>GLOBAL LEADERBOARD</b>\n<code>{period.title()}</code>\n\n"
+        title = f"🏆 <b>GLOBAL LEADERBOARD</b>\n<code>{period.upper()}</code>\n\n"
         body = format_leaderboard(users, "global", period)
         rank = find_rank(user_id, users)
 
     elif scope == "chat":
         users = get_chat_leaderboard(chat_id, period, limit=16)
-        title = f"🏆 <b>THIS CHAT LEADERBOARD</b>\n<code>{period.title()}</code>\n\n"
+        title = f"🏆 <b>THIS CHAT LEADERBOARD</b>\n<code>{period.upper()}</code>\n\n"
         body = format_leaderboard(users, "chat", period, chat_id)
         rank = find_rank(user_id, users)
 
     else:
         return
 
-    footer = f"\n━━━━━━━━━━━━\n👤 Your Rank: <b>{rank}</b>" if rank else ""
+    # Add footer with user's rank
+    if rank:
+        footer = f"\n━━━━━━━━━━━━\n👤 <b>Your Rank:</b> #{rank}"
+    else:
+        footer = "\n━━━━━━━━━━━━\n👤 <b>Your Rank:</b> Not in top 16"
 
     new_text = title + body + footer
 
